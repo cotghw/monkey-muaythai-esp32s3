@@ -30,6 +30,7 @@ private:
     String _commandTopic;
     String _statusTopic;
     String _telemetryTopic;
+    String _attendanceTopic;
     String _lwtTopic;
 
     // Internal methods
@@ -54,8 +55,12 @@ public:
     bool publishStatus(const String& commandId, const String& status,
                       JsonObject result = JsonObject(), const String& errorMsg = "");
     bool publishTelemetry(JsonObject telemetry);
+    bool publishAttendance(const String& deviceId, const String& memberId,
+                           const String& memberName, uint16_t confidence,
+                           bool accessGranted);
 
     void setCommandCallback(CommandCallback callback);
+    String getAttendanceTopic();
 
     bool isConnected();
     String getCommandTopic();

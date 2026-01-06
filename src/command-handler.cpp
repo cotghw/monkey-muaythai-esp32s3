@@ -1,8 +1,12 @@
 #include "command-handler.h"
+#include <base64.h>
 
-CommandHandler::CommandHandler(FingerprintHandler* fp, MQTTClient* mqtt) :
+CommandHandler::CommandHandler(FingerprintHandler* fp, MQTTClient* mqtt,
+                               DirectusClient* directus, WiFiManager* wifi) :
     _fp(fp),
     _mqtt(mqtt),
+    _directus(directus),
+    _wifi(wifi),
     _paused(false),
     _pauseStartTime(0)
 {
@@ -32,6 +36,10 @@ bool CommandHandler::executeCommand(const String& commandId, const String& type,
         result = handleGetInfo(commandId);
     } else if (type == "restart") {
         result = handleRestart(commandId);
+    } else if (type == "sync_all") {
+        result = handleSyncAll(commandId);
+    } else if (type == "get_status") {
+        result = handleGetStatus(commandId);
     } else {
         Serial.print("[CMD] ✗ Unknown command type: ");
         Serial.println(type);
@@ -52,7 +60,7 @@ CommandResult CommandHandler::handleEnroll(const String& cmdId, JsonObject param
 
     // Extract parameters
     int fingerprintId = params["fingerprint_id"] | -1;
-    String employeeCode = params["employee_code"] | "";
+    String memberId = params["member_id"] | "";
 
     if (fingerprintId < 1 || fingerprintId > 127) {
         Serial.println("[CMD] ✗ Invalid fingerprint_id (must be 1-127)");
@@ -63,8 +71,8 @@ CommandResult CommandHandler::handleEnroll(const String& cmdId, JsonObject param
 
     Serial.print("[CMD] Fingerprint ID: ");
     Serial.println(fingerprintId);
-    Serial.print("[CMD] Employee Code: ");
-    Serial.println(employeeCode);
+    Serial.print("[CMD] Member ID: ");
+    Serial.println(memberId);
 
     // Update status to processing
     publishStatus(cmdId, "processing");
@@ -88,10 +96,18 @@ CommandResult CommandHandler::handleEnroll(const String& cmdId, JsonObject param
         return CMD_SENSOR_ERROR;
     }
 
+    // Upload to Directus
+    String templateBase64 = base64::encode(templateBuffer, templateSize);
+    String deviceMac = _wifi->getMACAddress();
+
+    if (!_directus->enrollFingerprint(deviceMac, fingerprintId, templateBase64, memberId)) {
+        Serial.println("[CMD] ⚠ Failed to upload to Directus (saved locally)");
+    }
+
     // Create result object
     JsonDocument resultDoc;
     resultDoc["fingerprint_id"] = fingerprintId;
-    resultDoc["employee_code"] = employeeCode;
+    resultDoc["member_id"] = memberId;
     resultDoc["template_size"] = templateSize;
     resultDoc["confidence"] = _fp->getConfidence();
 
@@ -183,6 +199,79 @@ CommandResult CommandHandler::handleRestart(const String& cmdId) {
     delay(1000);
     ESP.restart();
 
+    return CMD_SUCCESS;
+}
+
+CommandResult CommandHandler::handleSyncAll(const String& cmdId) {
+    Serial.println("[CMD] → Syncing all fingerprints from Directus");
+    publishStatus(cmdId, "processing");
+
+    // Get device MAC
+    String deviceMac = _wifi->getMACAddress();
+
+    // Fetch fingerprints from Directus
+    JsonDocument doc;
+    int count = _directus->getFingerprints(deviceMac, doc);
+
+    if (count == 0) {
+        JsonDocument resultDoc;
+        resultDoc["total_fingerprints"] = 0;
+        resultDoc["synced"] = 0;
+        resultDoc["failed"] = 0;
+        publishStatus(cmdId, "completed", resultDoc.as<JsonObject>());
+        return CMD_SUCCESS;
+    }
+
+    // Download and upload each template
+    JsonArray data = doc["data"];
+    int synced = 0, failed = 0;
+
+    for (int i = 0; i < count; i++) {
+        String fpId = data[i]["id"].as<String>();
+        uint8_t localId;
+        uint8_t templateBuffer[512];
+        uint16_t templateSize;
+
+        if (_directus->downloadFingerprintTemplate(fpId, templateBuffer, &templateSize, &localId)) {
+            if (_fp->uploadModel(localId, templateBuffer, templateSize)) {
+                synced++;
+                Serial.printf("[CMD] ✓ Synced fingerprint ID %d\n", localId);
+            } else {
+                failed++;
+                Serial.printf("[CMD] ✗ Failed to upload ID %d to sensor\n", localId);
+            }
+        } else {
+            failed++;
+            Serial.printf("[CMD] ✗ Failed to download template %s\n", fpId.c_str());
+        }
+        delay(100);  // Prevent overwhelming sensor
+    }
+
+    JsonDocument resultDoc;
+    resultDoc["total_fingerprints"] = count;
+    resultDoc["synced"] = synced;
+    resultDoc["failed"] = failed;
+
+    Serial.printf("[CMD] ✓ Sync completed: %d/%d synced\n", synced, count);
+    publishStatus(cmdId, "completed", resultDoc.as<JsonObject>());
+    return CMD_SUCCESS;
+}
+
+CommandResult CommandHandler::handleGetStatus(const String& cmdId) {
+    Serial.println("[CMD] → Getting device status");
+
+    JsonDocument resultDoc;
+    resultDoc["device_mac"] = _wifi->getMACAddress();
+    resultDoc["wifi_connected"] = _wifi->isConnected();
+    resultDoc["wifi_rssi"] = WiFi.RSSI();
+    resultDoc["mqtt_connected"] = _mqtt->isConnected();
+    resultDoc["sensor_ok"] = (_fp->getTemplateCount() >= 0);
+    resultDoc["template_count"] = _fp->getTemplateCount();
+    resultDoc["free_heap"] = ESP.getFreeHeap();
+    resultDoc["uptime_seconds"] = millis() / 1000;
+
+    Serial.println("[CMD] ✓ Status retrieved");
+    publishStatus(cmdId, "completed", resultDoc.as<JsonObject>());
     return CMD_SUCCESS;
 }
 

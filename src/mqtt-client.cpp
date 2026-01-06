@@ -1,4 +1,6 @@
 #include "mqtt-client.h"
+#include "config.h"
+#include <time.h>
 
 // Static instance for callback
 MQTTClient* MQTTClient::instance = nullptr;
@@ -26,7 +28,8 @@ bool MQTTClient::begin(const char* broker, uint16_t port, const char* username,
     setupTopics();
 
     _client.setServer(_broker.c_str(), _port);
-    _client.setKeepAlive(60);  // 60 seconds keepalive
+    _client.setBufferSize(1024);  // Increase buffer for large JSON payloads
+    _client.setKeepAlive(60);     // 60 seconds keepalive
 
     Serial.println("[MQTT] Configuration:");
     Serial.print("  Broker: ");
@@ -44,9 +47,23 @@ bool MQTTClient::begin(const char* broker, uint16_t port, const char* username,
 }
 
 void MQTTClient::setupTopics() {
-    _commandTopic = "device/" + _deviceId + "/commands";
-    _statusTopic = "device/" + _deviceId + "/status";
-    _telemetryTopic = "device/" + _deviceId + "/telemetry";
+    // Format MAC for topic (remove colons, lowercase)
+    String macClean = _deviceId;
+    macClean.replace(":", "");
+    macClean.toLowerCase();
+
+    char buffer[64];
+
+    snprintf(buffer, sizeof(buffer), MQTT_TOPIC_COMMANDS_TEMPLATE, macClean.c_str());
+    _commandTopic = String(buffer);
+
+    snprintf(buffer, sizeof(buffer), MQTT_TOPIC_STATUS_TEMPLATE, macClean.c_str());
+    _statusTopic = String(buffer);
+
+    snprintf(buffer, sizeof(buffer), MQTT_TOPIC_TELEMETRY_TEMPLATE, macClean.c_str());
+    _telemetryTopic = String(buffer);
+
+    _attendanceTopic = MQTT_TOPIC_ATTENDANCE_LIVE;
     _lwtTopic = _statusTopic;
 }
 
@@ -210,6 +227,31 @@ bool MQTTClient::publishTelemetry(JsonObject telemetry) {
     return publish(_telemetryTopic.c_str(), payload.c_str(), false);
 }
 
+bool MQTTClient::publishAttendance(const String& deviceId, const String& memberId,
+                                    const String& memberName, uint16_t confidence,
+                                    bool accessGranted) {
+    JsonDocument doc;
+    doc["event"] = accessGranted ? "check_in" : "access_denied";
+    doc["device_id"] = deviceId;
+    doc["member_id"] = memberId;
+    doc["member_name"] = memberName;
+    doc["confidence"] = confidence;
+    doc["access_granted"] = accessGranted;
+
+    // ISO 8601 timestamp
+    time_t now = time(nullptr);
+    struct tm timeinfo;
+    gmtime_r(&now, &timeinfo);
+    char timestamp[30];
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%SZ", &timeinfo);
+    doc["timestamp"] = timestamp;
+
+    String payload;
+    serializeJson(doc, payload);
+
+    return publish(_attendanceTopic.c_str(), payload.c_str(), false);
+}
+
 void MQTTClient::messageCallback(char* topic, uint8_t* payload, unsigned int length) {
     if (instance) {
         instance->onMessage(topic, payload, length);
@@ -271,4 +313,8 @@ String MQTTClient::getStatusTopic() {
 
 String MQTTClient::getTelemetryTopic() {
     return _telemetryTopic;
+}
+
+String MQTTClient::getAttendanceTopic() {
+    return _attendanceTopic;
 }

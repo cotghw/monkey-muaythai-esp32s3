@@ -4,9 +4,11 @@
 #include <mbedtls/base64.h>
 #include <time.h>
 
-DirectusClient::DirectusClient(HTTPClientManager* httpClient, WiFiManager* wifiManager) {
+DirectusClient::DirectusClient(HTTPClientManager* httpClient, WiFiManager* wifiManager,
+                               OfflineQueue* offlineQueue) {
     _httpClient = httpClient;
     _wifiManager = wifiManager;
+    _offlineQueue = offlineQueue;
     _deviceUuid = "";  // Will be loaded on first request
 }
 
@@ -21,7 +23,7 @@ String DirectusClient::getDeviceId(const String& deviceMac) {
     }
 
     // Query Directus for device by MAC address
-    String url = buildUrl("/items/devices?filter[device_mac][_eq]=" + deviceMac);
+    String url = buildUrl("/items/fingerprint_devices?filter[device_mac][_eq]=" + deviceMac);
     String response;
 
     int httpCode = _httpClient->get(url.c_str(), response);
@@ -55,7 +57,7 @@ String DirectusClient::registerDevice(const String& deviceMac, const String& dev
         doc["status"] = "online";
 
         String jsonPayload = _httpClient->createJSON(doc);
-        String url = buildUrl("/items/devices/" + existingId);
+        String url = buildUrl("/items/fingerprint_devices/" + existingId);
         String response;
 
         // Note: Directus PATCH requires different HTTP method
@@ -68,12 +70,11 @@ String DirectusClient::registerDevice(const String& deviceMac, const String& dev
     JsonDocument doc;
     doc["device_mac"] = deviceMac;
     doc["device_name"] = deviceName;
-    doc["ip_address"] = ipAddress;
-    doc["status"] = "online";
-    doc["is_active"] = true;
+    doc["branch_id"] = DEVICE_BRANCH_ID;
+    doc["status"] = "active";
 
     String jsonPayload = _httpClient->createJSON(doc);
-    String url = buildUrl("/items/devices");
+    String url = buildUrl("/items/fingerprint_devices");
     String response;
 
     int httpCode = _httpClient->post(url.c_str(), jsonPayload, response);
@@ -98,7 +99,7 @@ bool DirectusClient::compareTemplates(const String& template1, const String& tem
 }
 
 bool DirectusClient::findMatchingFingerprint(const String& deviceMac, const String& templateData,
-                                            String& fingerprintId, String& employeeId) {
+                                            String& fingerprintId, String& memberId) {
     // NOTE: Simplified version - Skip template matching
     // R307 sensor đã verify fingerprint, chúng ta chỉ cần log vào Directus
 
@@ -106,16 +107,16 @@ bool DirectusClient::findMatchingFingerprint(const String& deviceMac, const Stri
     Serial.println("  Skip Directus template matching (Adafruit library limitation)");
 
     // Return placeholder values
-    // Actual employee tracking sẽ được handle sau khi enroll vào Directus
+    // Actual member tracking sẽ được handle sau khi enroll vào Directus
     fingerprintId = "verified";
-    employeeId = "unknown";
+    memberId = "unknown";
 
     return true;
 }
 
 bool DirectusClient::verifyFingerprint(const String& deviceMac, uint8_t fingerprintID,
                                       const String& templateData, uint16_t confidence,
-                                      String& employeeId) {
+                                      String& memberId) {
     if (!_wifiManager->isConnected()) {
         Serial.println("✗ WiFi chưa kết nối!");
         return false;
@@ -127,7 +128,7 @@ bool DirectusClient::verifyFingerprint(const String& deviceMac, uint8_t fingerpr
 
     // Tìm fingerprint match
     String fingerprintId;
-    if (!findMatchingFingerprint(deviceMac, templateData, fingerprintId, employeeId)) {
+    if (!findMatchingFingerprint(deviceMac, templateData, fingerprintId, memberId)) {
         // Log failed attempt
         String deviceId = getDeviceId(deviceMac);
         logAttendance("", deviceId, fingerprintID, confidence, false, "not_registered");
@@ -135,13 +136,12 @@ bool DirectusClient::verifyFingerprint(const String& deviceMac, uint8_t fingerpr
     }
 
     // Check confidence threshold
-    // TODO: Get threshold from fingerprint record
     const uint16_t MIN_CONFIDENCE = 80;
     if (confidence < MIN_CONFIDENCE) {
         Serial.printf("✗ Confidence quá thấp (%d < %d)\n", confidence, MIN_CONFIDENCE);
 
         String deviceId = getDeviceId(deviceMac);
-        logAttendance(employeeId, deviceId, fingerprintID, confidence, false, "low_confidence");
+        logAttendance(memberId, deviceId, fingerprintID, confidence, false, "low_confidence");
         return false;
     }
 
@@ -149,19 +149,19 @@ bool DirectusClient::verifyFingerprint(const String& deviceMac, uint8_t fingerpr
     Serial.println("\n╔════════════════════════════════════════╗");
     Serial.println("║       ✓ ACCESS GRANTED!               ║");
     Serial.println("╠════════════════════════════════════════╣");
-    Serial.printf("║   Employee ID: %s\n", employeeId.c_str());
+    Serial.printf("║   Member ID: %s\n", memberId.c_str());
     Serial.printf("║   Confidence: %d                       ║\n", confidence);
     Serial.println("╚════════════════════════════════════════╝");
 
     // Log successful attendance
     String deviceId = getDeviceId(deviceMac);
-    logAttendance(employeeId, deviceId, fingerprintID, confidence, true, "success");
+    logAttendance(memberId, deviceId, fingerprintID, confidence, true, "success");
 
     return true;
 }
 
 bool DirectusClient::enrollFingerprint(const String& deviceMac, uint8_t fingerprintID,
-                                      const String& templateData, const String& employeeCode) {
+                                      const String& templateData, const String& memberId) {
     if (!_wifiManager->isConnected()) {
         Serial.println("✗ WiFi chưa kết nối!");
         return false;
@@ -178,47 +178,35 @@ bool DirectusClient::enrollFingerprint(const String& deviceMac, uint8_t fingerpr
         return false;
     }
 
-    // Get employee UUID from employee_code
-    String url = buildUrl("/items/employees?filter[employee_code][_eq]=" + employeeCode);
+    // Verify member exists
+    String url = buildUrl("/items/members/" + memberId);
     String response;
 
     int httpCode = _httpClient->get(url.c_str(), response);
 
-    String employeeId = "";
-    if (httpCode == 200) {
-        JsonDocument doc;
-        if (_httpClient->parseJSON(response, doc)) {
-            JsonArray data = doc["data"];
-            if (data.size() > 0) {
-                employeeId = data[0]["id"].as<String>();
-            }
-        }
-    }
-
-    if (employeeId.length() == 0) {
-        Serial.printf("✗ Không tìm thấy employee code: %s\n", employeeCode.c_str());
+    if (httpCode != 200) {
+        Serial.printf("✗ Không tìm thấy member ID: %s\n", memberId.c_str());
         return false;
     }
 
     // Create fingerprint record
     JsonDocument enrollDoc;
-    enrollDoc["employee_id"] = employeeId;
+    enrollDoc["member_id"] = memberId;
     enrollDoc["device_id"] = deviceId;
-    enrollDoc["fingerprint_id"] = fingerprintID;
+    enrollDoc["finger_print_id"] = fingerprintID;
     enrollDoc["template_data"] = templateData;
-    enrollDoc["is_active"] = true;
+    enrollDoc["status"] = "active";
 
-    // Get current timestamp from WiFiManager (NTP sync)
-    // Format: ISO 8601 (YYYY-MM-DDTHH:MM:SS.sssZ)
+    // Get current timestamp
     time_t now = time(nullptr);
     struct tm timeinfo;
     gmtime_r(&now, &timeinfo);
     char timestamp[30];
     strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S.000Z", &timeinfo);
-    enrollDoc["enrolled_at"] = timestamp;
+    enrollDoc["registered_at"] = timestamp;
 
     String jsonPayload = _httpClient->createJSON(enrollDoc);
-    url = buildUrl("/items/fingerprints");
+    url = buildUrl("/items/member_fingerprints");
 
     httpCode = _httpClient->post(url.c_str(), jsonPayload, response);
 
@@ -231,20 +219,19 @@ bool DirectusClient::enrollFingerprint(const String& deviceMac, uint8_t fingerpr
     return false;
 }
 
-bool DirectusClient::logAttendance(const String& employeeId, const String& deviceId,
+bool DirectusClient::logAttendance(const String& memberId, const String& deviceId,
                                   uint8_t fingerprintID, uint16_t confidence,
                                   bool accessGranted, const String& reason) {
     JsonDocument doc;
 
-    if (employeeId.length() > 0 && employeeId != "unknown") {
-        doc["employee_id"] = employeeId;
+    if (memberId.length() > 0 && memberId != "unknown") {
+        doc["member_id"] = memberId;
     }
 
     doc["device_id"] = deviceId;
-    doc["fingerprint_id"] = fingerprintID;
     doc["confidence"] = confidence;
     doc["access_granted"] = accessGranted;
-    doc["reason"] = reason;
+    doc["deny_reason"] = reason;
 
     // Add current timestamp
     time_t now = time(nullptr);
@@ -252,10 +239,10 @@ bool DirectusClient::logAttendance(const String& employeeId, const String& devic
     gmtime_r(&now, &timeinfo);
     char timestamp[30];
     strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%S.000Z", &timeinfo);
-    doc["timestamp"] = timestamp;
+    doc["check_in_time"] = timestamp;
 
     String jsonPayload = _httpClient->createJSON(doc);
-    String url = buildUrl("/items/attendance_logs");
+    String url = buildUrl("/items/attendance");
     String response;
 
     int httpCode = _httpClient->post(url.c_str(), jsonPayload, response);
@@ -265,7 +252,13 @@ bool DirectusClient::logAttendance(const String& employeeId, const String& devic
         return true;
     }
 
-    Serial.printf("⚠ Lỗi log attendance (HTTP %d)\n", httpCode);
+    // Queue for later sync if offline queue available
+    if (_offlineQueue) {
+        _offlineQueue->enqueue("/items/attendance", "POST", jsonPayload);
+        Serial.println("[DIRECTUS] Queued attendance for later sync");
+    } else {
+        Serial.printf("⚠ Lỗi log attendance (HTTP %d)\n", httpCode);
+    }
     return false;
 }
 
@@ -283,8 +276,8 @@ int DirectusClient::getFingerprints(const String& deviceMac, JsonDocument& doc) 
     }
 
     // Query fingerprints for this device
-    String url = buildUrl("/items/fingerprints?filter[device_id][_eq]=" + deviceId +
-                         "&filter[is_active][_eq]=true&limit=127");
+    String url = buildUrl("/items/member_fingerprints?filter[device_id][_eq]=" + deviceId +
+                         "&filter[status][_eq]=active&fields=id,finger_print_id,member_id,template_data&limit=127");
     String response;
 
     int httpCode = _httpClient->get(url.c_str(), response);
@@ -311,7 +304,7 @@ bool DirectusClient::downloadFingerprintTemplate(const String& fingerprintId,
     }
 
     // Get fingerprint record
-    String url = buildUrl("/items/fingerprints/" + fingerprintId);
+    String url = buildUrl("/items/member_fingerprints/" + fingerprintId);
     String response;
 
     int httpCode = _httpClient->get(url.c_str(), response);
@@ -320,7 +313,7 @@ bool DirectusClient::downloadFingerprintTemplate(const String& fingerprintId,
         JsonDocument doc;
         if (_httpClient->parseJSON(response, doc)) {
             String templateDataBase64 = doc["data"]["template_data"].as<String>();
-            *fingerprintIdLocal = doc["data"]["fingerprint_id"].as<uint8_t>();
+            *fingerprintIdLocal = doc["data"]["finger_print_id"].as<uint8_t>();
 
             if (templateDataBase64.length() == 0) {
                 Serial.println("✗ Template data rỗng!");

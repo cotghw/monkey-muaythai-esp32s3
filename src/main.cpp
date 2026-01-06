@@ -7,6 +7,7 @@
 #include "directus-client.h"
 #include "mqtt-client.h"
 #include "command-handler.h"
+#include "offline-queue.h"
 
 // ==========================================
 // Global Objects
@@ -18,12 +19,14 @@ HTTPClientManager* httpClient;
 DirectusClient* directusClient;
 MQTTClient* mqttClient;
 CommandHandler* commandHandler;
+OfflineQueue* offlineQueue;
 
 // ==========================================
 // Global Variables
 // ==========================================
 bool autoLoginMode = false;
 unsigned long lastFingerprintCheck = 0;
+static bool wasWiFiConnected = false;
 
 // Buffer cho fingerprint template
 uint8_t templateBuffer[512];
@@ -82,11 +85,21 @@ void setup() {
         Serial.println("\nHệ thống sẽ chạy ở chế độ offline (không có CMS).");
     }
 
-    // 3. Khởi tạo HTTP Client và Directus Client
-    httpClient = new HTTPClientManager();
-    directusClient = new DirectusClient(httpClient, wifiManager);
+    // 3. Khởi tạo Offline Queue
+    Serial.println("\n→ Khởi tạo Offline Queue...");
+    offlineQueue = new OfflineQueue();
+    if (offlineQueue->begin()) {
+        Serial.printf("✓ Offline queue ready (%d pending)\n",
+                      offlineQueue->getPendingCount());
+    } else {
+        Serial.println("⚠ Offline queue init failed");
+    }
 
-    // 4. Register device with Directus
+    // 4. Khởi tạo HTTP Client và Directus Client
+    httpClient = new HTTPClientManager();
+    directusClient = new DirectusClient(httpClient, wifiManager, offlineQueue);
+
+    // 5. Register device with Directus
     if (wifiManager->isConnected()) {
         String deviceMac = wifiManager->getMACAddress();
         String deviceName = "ESP32-FP-001";  // Có thể customize
@@ -98,15 +111,15 @@ void setup() {
         }
     }
 
-    // 5. Khởi tạo MQTT Client
+    // 6. Khởi tạo MQTT Client
     Serial.println("\n→ Khởi tạo MQTT Client...");
     mqttClient = new MQTTClient(wifiManager);
 
     String deviceMac = wifiManager->getMACAddress();
     mqttClient->begin(MQTT_BROKER, MQTT_PORT, MQTT_USERNAME, MQTT_PASSWORD, deviceMac);
 
-    // 6. Khởi tạo Command Handler
-    commandHandler = new CommandHandler(fpHandler, mqttClient);
+    // 7. Khởi tạo Command Handler
+    commandHandler = new CommandHandler(fpHandler, mqttClient, directusClient, wifiManager);
 
     // Set command callback
     mqttClient->setCommandCallback([](const String& commandId, const String& type, JsonObject params) {
@@ -121,6 +134,17 @@ void setup() {
 // Loop
 // ==========================================
 void loop() {
+    // Check WiFi reconnect for queue flush
+    bool isConnected = wifiManager->isConnected();
+    if (isConnected && !wasWiFiConnected) {
+        Serial.println("\n✓ WiFi reconnected!");
+        if (offlineQueue && offlineQueue->getPendingCount() > 0) {
+            Serial.println("→ Flushing offline queue...");
+            offlineQueue->flush(httpClient, DIRECTUS_URL);
+        }
+    }
+    wasWiFiConnected = isConnected;
+
     // MQTT loop - handle connection and messages
     mqttClient->loop();
 
@@ -268,10 +292,10 @@ void enrollFingerprint() {
                 }
                 delay(100);
 
-                Serial.println("Nhập mã nhân viên (VD: EMP001): ");
+                Serial.println("Nhập Member ID (UUID): ");
                 Serial.println("(Bạn có 30 giây để nhập, hoặc Enter để bỏ qua)");
 
-                String employeeCode = "";
+                String memberId = "";
                 unsigned long timeout = millis();
                 const unsigned long timeoutDuration = 30000; // 30 giây
                 unsigned long lastCountdown = 0;
@@ -285,23 +309,23 @@ void enrollFingerprint() {
                     }
 
                     if (Serial.available()) {
-                        employeeCode = Serial.readStringUntil('\n');
-                        employeeCode.trim();
+                        memberId = Serial.readStringUntil('\n');
+                        memberId.trim();
                         break;
                     }
                     delay(100);
                 }
 
-                if (employeeCode.length() > 0) {
-                    Serial.printf("✓ Đã nhận mã nhân viên: %s\n", employeeCode.c_str());
+                if (memberId.length() > 0) {
+                    Serial.printf("✓ Đã nhận Member ID: %s\n", memberId.c_str());
 
                     // Convert template to Base64
                     String templateBase64 = base64::encode(templateBuffer, templateSize);
                     String deviceMac = wifiManager->getMACAddress();
 
-                    directusClient->enrollFingerprint(deviceMac, id, templateBase64, employeeCode);
+                    directusClient->enrollFingerprint(deviceMac, id, templateBase64, memberId);
                 } else {
-                    Serial.println("⚠ Không nhập mã nhân viên, bỏ qua đăng ký lên Directus");
+                    Serial.println("⚠ Không nhập Member ID, bỏ qua đăng ký lên Directus");
                 }
             } else {
                 Serial.println("⚠ WiFi chưa kết nối, không thể gửi lên CMS.");
@@ -394,11 +418,11 @@ void testLogin() {
                 // Convert to Base64
                 String templateBase64 = base64::encode(templateBuffer, templateSize);
                 String deviceMac = wifiManager->getMACAddress();
-                String employeeId;
+                String memberId;
 
                 // Verify với Directus
                 bool access = directusClient->verifyFingerprint(deviceMac, fingerprintID,
-                                                               templateBase64, confidence, employeeId);
+                                                               templateBase64, confidence, memberId);
 
                 if (access) {
                     fpHandler->ledOn(2); // Blue LED - Success
@@ -492,11 +516,11 @@ void restoreFromDirectus() {
     JsonArray data = doc["data"];
     for (int i = 0; i < count; i++) {
         String fpId = data[i]["id"].as<String>();
-        uint8_t localId = data[i]["fingerprint_id"].as<uint8_t>();
-        String employeeCode = data[i]["employee_code"].as<String>();
+        uint8_t localId = data[i]["finger_print_id"].as<uint8_t>();
+        String memberId = data[i]["member_id"].as<String>();
 
-        Serial.printf("[%d] ID: %d | Employee: %s | UUID: %s\n",
-                     i + 1, localId, employeeCode.c_str(), fpId.c_str());
+        Serial.printf("[%d] ID: %d | Member: %s | UUID: %s\n",
+                     i + 1, localId, memberId.c_str(), fpId.c_str());
     }
 
     Serial.println("─────────────────────────────────────────");
@@ -594,11 +618,11 @@ void checkAutoLogin() {
             // Convert to Base64
             String templateBase64 = base64::encode(templateBuffer, templateSize);
             String deviceMac = wifiManager->getMACAddress();
-            String employeeId;
+            String memberId;
 
             // Verify với Directus
             bool access = directusClient->verifyFingerprint(deviceMac, fingerprintID,
-                                                           templateBase64, confidence, employeeId);
+                                                           templateBase64, confidence, memberId);
 
             if (access) {
                 fpHandler->ledOn(2); // Blue LED

@@ -3,6 +3,7 @@
 
 #include "http-client.h"
 #include "wifi-manager.h"
+#include "offline-queue.h"
 #include <ArduinoJson.h>
 
 /**
@@ -16,7 +17,8 @@
  */
 class DirectusClient {
 public:
-    DirectusClient(HTTPClientManager* httpClient, WiFiManager* wifiManager);
+    DirectusClient(HTTPClientManager* httpClient, WiFiManager* wifiManager,
+                   OfflineQueue* offlineQueue = nullptr);
 
     /**
      * Verify fingerprint với Directus
@@ -24,23 +26,23 @@ public:
      * @param fingerprintID ID vân tay (1-127)
      * @param templateData Base64 encoded template
      * @param confidence Confidence score
-     * @param employeeId Output: Employee UUID nếu verify thành công
+     * @param memberId Output: Member UUID nếu verify thành công
      * @return true nếu access granted
      */
     bool verifyFingerprint(const String& deviceMac, uint8_t fingerprintID,
                           const String& templateData, uint16_t confidence,
-                          String& employeeId);
+                          String& memberId);
 
     /**
      * Enroll fingerprint mới vào Directus
      * @param deviceMac MAC address
      * @param fingerprintID ID vân tay
      * @param templateData Base64 template
-     * @param employeeCode Mã nhân viên (EMP001)
+     * @param memberId Member UUID
      * @return true nếu enroll thành công
      */
     bool enrollFingerprint(const String& deviceMac, uint8_t fingerprintID,
-                          const String& templateData, const String& employeeCode);
+                          const String& templateData, const String& memberId);
 
     /**
      * Tạo hoặc cập nhật device info
@@ -54,7 +56,7 @@ public:
 
     /**
      * Log attendance (check in/out)
-     * @param employeeId Employee UUID
+     * @param memberId Member UUID
      * @param deviceId Device UUID
      * @param fingerprintID ID vân tay
      * @param confidence Confidence score
@@ -62,7 +64,7 @@ public:
      * @param reason Lý do (success, low_confidence, not_registered...)
      * @return true nếu log thành công
      */
-    bool logAttendance(const String& employeeId, const String& deviceId,
+    bool logAttendance(const String& memberId, const String& deviceId,
                       uint8_t fingerprintID, uint16_t confidence,
                       bool accessGranted, const String& reason);
 
@@ -97,6 +99,7 @@ public:
 private:
     HTTPClientManager* _httpClient;
     WiFiManager* _wifiManager;
+    OfflineQueue* _offlineQueue;
     String _deviceUuid;  // Cache device UUID
 
     /**
@@ -111,11 +114,11 @@ private:
      * @param deviceMac MAC address
      * @param templateData Template để so sánh
      * @param fingerprintId Output: Fingerprint UUID nếu tìm thấy
-     * @param employeeId Output: Employee UUID nếu tìm thấy
+     * @param memberId Output: Member UUID nếu tìm thấy
      * @return true nếu tìm thấy match
      */
     bool findMatchingFingerprint(const String& deviceMac, const String& templateData,
-                                String& fingerprintId, String& employeeId);
+                                String& fingerprintId, String& memberId);
 
     /**
      * So sánh 2 Base64 template strings

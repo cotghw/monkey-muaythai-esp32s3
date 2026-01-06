@@ -5,6 +5,8 @@
 #include <ArduinoJson.h>
 #include "fingerprint-handler.h"
 #include "mqtt-client.h"
+#include "directus-client.h"
+#include "wifi-manager.h"
 
 // Command execution results
 enum CommandResult {
@@ -19,6 +21,8 @@ class CommandHandler {
 private:
     FingerprintHandler* _fp;
     MQTTClient* _mqtt;
+    DirectusClient* _directus;
+    WiFiManager* _wifi;
 
     // Command handlers
     CommandResult handleEnroll(const String& cmdId, JsonObject params);
@@ -26,6 +30,8 @@ private:
     CommandResult handleDeleteAll(const String& cmdId);
     CommandResult handleGetInfo(const String& cmdId);
     CommandResult handleRestart(const String& cmdId);
+    CommandResult handleSyncAll(const String& cmdId);
+    CommandResult handleGetStatus(const String& cmdId);
 
     // Helper methods
     void publishStatus(const String& cmdId, const String& status,
@@ -33,7 +39,8 @@ private:
     JsonDocument createResultDoc();
 
 public:
-    CommandHandler(FingerprintHandler* fp, MQTTClient* mqtt);
+    CommandHandler(FingerprintHandler* fp, MQTTClient* mqtt,
+                   DirectusClient* directus, WiFiManager* wifi);
 
     bool executeCommand(const String& commandId, const String& type,
                        JsonObject params);

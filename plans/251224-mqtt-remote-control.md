@@ -2,9 +2,11 @@
 
 **Date:** 2025-12-24
 **Issue:** Remote device management via MQTT
-**Status:** In Progress (60% complete - ESP32 implementation done, needs fixes)
-**Updated:** 2025-12-26 - Code review completed, critical issues identified
-**Review Report:** /Users/yihan/testing-base/esp32s3/plans/reports/code-reviewer-251226-mqtt-implementation.md
+**Status:** In Progress (65% complete - Phase 2 schema update partially done, critical fixes needed)
+**Updated:** 2026-01-06 - Directus schema update review completed, downstream code inconsistencies found
+**Review Reports:**
+- Phase 1 (MQTT): `/Users/yihan/working-base/yihan/monkey-muaythai/esp32s3/plans/reports/code-reviewer-251226-mqtt-implementation.md`
+- Phase 2 (Schema): `/Users/yihan/working-base/yihan/monkey-muaythai/esp32s3/plans/reports/code-reviewer-260106-directus-schema-update.md`
 
 ## Overview
 
@@ -37,13 +39,21 @@ Implement real-time remote control for ESP32 fingerprint devices using MQTT prot
 
 ### ⚠️ Pending Work
 
-**Critical Fixes Needed:**
+**Critical Fixes Needed (From Phase 1 Review):**
 1. Add MQTT message size validation (4KB limit)
 2. Move credentials to config.example.h + .gitignore
 3. Fix memory leaks (use stack allocation)
 4. Add enrollment timeout protection (60s max)
 5. Configure PubSubClient buffer size (4096 bytes)
 6. Use StaticJsonDocument instead of JsonDocument
+
+**Critical Fixes Needed (From Phase 2 Review - 2026-01-06):**
+1. ⚠️ **INCOMPLETE MIGRATION:** Update main.cpp variable names (`employeeId` → `memberId` at lines 397, 597)
+2. ⚠️ **INCOMPLETE MIGRATION:** Update command-handler.cpp MQTT param (`employee_code` → `member_id` at lines 55, 94)
+3. ⚠️ **SEMANTIC MISMATCH:** Clarify memberId must be UUID (not employee code string)
+4. ⚠️ **SECURITY:** Rotate exposed credentials in config.h (WiFi password, Directus token, Cloudflare URL)
+5. ⚠️ **VALIDATION:** Add UUID format validation before API calls
+6. 🔵 **DRY VIOLATION:** Extract timestamp generation to helper function (duplicated at lines 198-203, 234-239)
 
 **Not Yet Implemented:**
 - Security layer (MQTT TLS, ACL configuration)
@@ -52,11 +62,12 @@ Implement real-time remote control for ESP32 fingerprint devices using MQTT prot
 - Directus backend service deployment
 - Load testing & performance optimization
 
-### 📊 Progress: 60% Complete
+### 📊 Progress: 65% Complete
 - **ESP32 Core:** 100% (needs hardening)
+- **Schema Migration:** 80% (directus-client done, downstream code incomplete)
 - **Documentation:** 100%
 - **Backend Services:** 0% (code provided, needs deployment)
-- **Security:** 0% (plan exists, not implemented)
+- **Security:** 0% (plan exists, not implemented - credentials exposed)
 - **Testing:** 0% (manual instructions only)
 
 ## Why MQTT instead of WebSocket?
@@ -551,6 +562,14 @@ mosquitto_sub -h broker.hivemq.com -t "device/+/status"
 6. **MQTT broker choice:** Start with HiveMQ Cloud (free tier), migrate to AWS IoT Core if needed
 7. **QoS level for commands:** ⚠️ PARTIAL - QoS 1 subscribe works, publish needs fix (PubSubClient limitation)
 8. **Message size limit:** ⚠️ NOT ENFORCED - Max 4KB per message defined but not validated in code
+
+## New Questions (From Phase 2 Review - 2026-01-06)
+
+1. **UUID vs Employee Code:** Should MQTT command use `member_id` (UUID) or lookup via `employee_code`? Current code inconsistent - command-handler expects `employee_code` but directus-client needs UUID.
+2. **Template Matching:** directus-client skips template matching (lines 100-111) - is R307 sensor matching sufficient or should Directus do secondary verification?
+3. **Field Transition Plan:** Are old field names (`employee_id`, `fingerprint_id`) still supported in backend for migration period?
+4. **Confidence Threshold:** MIN_CONFIDENCE=80 - empirically validated or placeholder? Should be environment-specific?
+5. **512-byte Padding:** Why pad templates to exactly 512 bytes (line 338-341)? R307 spec requirement or Directus storage format?
 
 ---
 
