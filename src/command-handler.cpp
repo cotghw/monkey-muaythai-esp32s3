@@ -40,6 +40,8 @@ bool CommandHandler::executeCommand(const String& commandId, const String& type,
         result = handleSyncAll(commandId);
     } else if (type == "get_status") {
         result = handleGetStatus(commandId);
+    } else if (type == "update") {
+        result = handleUpdate(commandId, params);
     } else {
         Serial.print("[CMD] ✗ Unknown command type: ");
         Serial.println(type);
@@ -112,6 +114,85 @@ CommandResult CommandHandler::handleEnroll(const String& cmdId, JsonObject param
     resultDoc["confidence"] = _fp->getConfidence();
 
     Serial.println("[CMD] ✓ Enrollment completed successfully");
+    publishStatus(cmdId, "completed", resultDoc.as<JsonObject>());
+
+    return CMD_SUCCESS;
+}
+
+CommandResult CommandHandler::handleUpdate(const String& cmdId, JsonObject params) {
+    Serial.println("[CMD] → Starting fingerprint update (re-enrollment)");
+
+    // Extract parameters
+    int fingerprintId = params["fingerprint_id"] | -1;
+    String memberId = params["member_id"] | "";
+
+    if (fingerprintId < 1 || fingerprintId > 127) {
+        Serial.println("[CMD] ✗ Invalid fingerprint_id (must be 1-127)");
+        publishStatus(cmdId, "failed", JsonObject(),
+                     "Invalid fingerprint_id (must be 1-127)");
+        return CMD_INVALID_PARAMS;
+    }
+
+    Serial.print("[CMD] Update fingerprint ID: ");
+    Serial.println(fingerprintId);
+    Serial.print("[CMD] Member ID: ");
+    Serial.println(memberId);
+
+    // Update status to processing
+    publishStatus(cmdId, "processing");
+
+    // Step 1: Delete existing fingerprint at this ID
+    Serial.println("[CMD] Step 1: Deleting existing fingerprint...");
+    bool existed = _fp->deleteFingerprint(fingerprintId);
+    if (existed) {
+        Serial.println("[CMD] ✓ Existing fingerprint deleted");
+    } else {
+        Serial.println("[CMD] ⚠ No existing fingerprint at this ID (continuing anyway)");
+    }
+
+    // Small delay to ensure sensor is ready
+    delay(100);
+
+    // Step 2: Enroll new fingerprint
+    Serial.println("[CMD] Step 2: Enrolling new fingerprint...");
+    int enrollResult = _fp->enrollFingerprint(fingerprintId);
+
+    if (enrollResult < 0) {
+        Serial.println("[CMD] ✗ Enrollment failed");
+        publishStatus(cmdId, "failed", JsonObject(), "Fingerprint re-enrollment failed");
+        return CMD_SENSOR_ERROR;
+    }
+
+    // Step 3: Get template data
+    uint8_t templateBuffer[512];
+    uint16_t templateSize = 0;
+
+    if (!_fp->getTemplate(fingerprintId, templateBuffer, &templateSize)) {
+        Serial.println("[CMD] ✗ Failed to get template data");
+        publishStatus(cmdId, "failed", JsonObject(), "Failed to get template data");
+        return CMD_SENSOR_ERROR;
+    }
+
+    // Step 4: Upload to Directus
+    String templateBase64 = base64::encode(templateBuffer, templateSize);
+    String deviceMac = _wifi->getMACAddress();
+
+    bool synced = _directus->enrollFingerprint(deviceMac, fingerprintId, templateBase64, memberId);
+    if (!synced) {
+        Serial.println("[CMD] ⚠ Failed to upload to Directus (saved locally)");
+        // Continue - fingerprint is enrolled on device
+    }
+
+    // Create result object
+    JsonDocument resultDoc;
+    resultDoc["fingerprint_id"] = fingerprintId;
+    resultDoc["member_id"] = memberId;
+    resultDoc["template_size"] = templateSize;
+    resultDoc["confidence"] = _fp->getConfidence();
+    resultDoc["updated"] = true;  // Flag to indicate this was an update
+    resultDoc["synced"] = synced; // Directus sync status
+
+    Serial.println("[CMD] ✓ Update completed successfully");
     publishStatus(cmdId, "completed", resultDoc.as<JsonObject>());
 
     return CMD_SUCCESS;

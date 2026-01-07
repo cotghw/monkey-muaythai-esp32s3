@@ -32,6 +32,7 @@ private:
     CommandResult handleRestart(const String& cmdId);
     CommandResult handleSyncAll(const String& cmdId);
     CommandResult handleGetStatus(const String& cmdId);
+    CommandResult handleUpdate(const String& cmdId, JsonObject params);
 
     // Helper methods
     void publishStatus(const String& cmdId, const String& status,
