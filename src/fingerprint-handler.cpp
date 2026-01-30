@@ -1,9 +1,15 @@
 #include "fingerprint-handler.h"
+#include "buzzer-handler.h"
 
 FingerprintHandler::FingerprintHandler(HardwareSerial *serial) {
     serialPort = serial;  // Save serial port reference
     finger = new Adafruit_Fingerprint(serial);
     enrollStep = 0;
+    buzzer = nullptr;
+}
+
+void FingerprintHandler::setBuzzer(BuzzerHandler* buzz) {
+    buzzer = buzz;
 }
 
 bool FingerprintHandler::begin() {
@@ -85,6 +91,7 @@ int FingerprintHandler::enrollFingerprint(uint8_t id) {
 
     // Bước 1: Lấy ảnh lần 1
     Serial.println("Đặt ngón tay lên cảm biến...");
+    if (buzzer) buzzer->play(BUZZ_SINGLE);
     ledOn(2); // Blue LED
 
     while (finger->getImage() != FINGERPRINT_OK) {
@@ -95,12 +102,14 @@ int FingerprintHandler::enrollFingerprint(uint8_t id) {
     uint8_t p = finger->image2Tz(1);
     if (p != FINGERPRINT_OK) {
         Serial.println("✗ Lỗi chuyển đổi ảnh lần 1");
+        if (buzzer) buzzer->play(BUZZ_ERROR);
         ledOff();
         return -1;
     }
 
     // Yêu cầu nhấc tay
     Serial.println("Nhấc tay ra...");
+    if (buzzer) buzzer->play(BUZZ_DOUBLE);
     delay(2000);
     while (finger->getImage() != FINGERPRINT_NOFINGER) {
         delay(100);
@@ -108,6 +117,7 @@ int FingerprintHandler::enrollFingerprint(uint8_t id) {
 
     // Bước 2: Lấy ảnh lần 2
     Serial.println("Đặt lại ngón tay lên cảm biến...");
+    if (buzzer) buzzer->play(BUZZ_SINGLE);
     ledOn(3); // Purple LED
 
     while (finger->getImage() != FINGERPRINT_OK) {
@@ -118,6 +128,7 @@ int FingerprintHandler::enrollFingerprint(uint8_t id) {
     p = finger->image2Tz(2);
     if (p != FINGERPRINT_OK) {
         Serial.println("✗ Lỗi chuyển đổi ảnh lần 2");
+        if (buzzer) buzzer->play(BUZZ_ERROR);
         ledOff();
         return -1;
     }
@@ -126,6 +137,7 @@ int FingerprintHandler::enrollFingerprint(uint8_t id) {
     p = finger->createModel();
     if (p != FINGERPRINT_OK) {
         Serial.println("✗ Vân tay không khớp, thử lại!");
+        if (buzzer) buzzer->play(BUZZ_ERROR);
         ledOff();
         return -1;
     }
@@ -134,12 +146,14 @@ int FingerprintHandler::enrollFingerprint(uint8_t id) {
     p = finger->storeModel(id);
     if (p == FINGERPRINT_OK) {
         Serial.printf("✓ Đã lưu vân tay ID #%d thành công!\n", id);
+        if (buzzer) buzzer->play(BUZZ_SUCCESS);
         ledOn(2); // Blue LED success
         delay(500);
         ledOff();
         return id;
     } else {
         Serial.println("✗ Lỗi lưu vân tay");
+        if (buzzer) buzzer->play(BUZZ_ERROR);
         ledOff();
         return -1;
     }
@@ -149,13 +163,13 @@ int FingerprintHandler::verifyFingerprint() {
     // Lấy ảnh
     uint8_t p = finger->getImage();
     if (p != FINGERPRINT_OK) {
-        return -1;
+        return -2;  // -2 = không có ngón tay hoặc lỗi capture
     }
 
     // Chuyển đổi ảnh
     p = finger->image2Tz();
     if (p != FINGERPRINT_OK) {
-        return -1;
+        return -1;  // -1 = có ngón tay nhưng lỗi chuyển đổi
     }
 
     // Tìm kiếm trong database
@@ -165,19 +179,23 @@ int FingerprintHandler::verifyFingerprint() {
                      finger->fingerID, finger->confidence);
         return finger->fingerID;
     } else {
-        Serial.println("✗ Không tìm thấy vân tay khớp");
-        return -1;
+        Serial.println("✗ Có ngón tay nhưng KHÔNG KHỚP!");
+        return -1;  // -1 = có ngón tay nhưng không khớp (SAI!)
     }
 }
 
 bool FingerprintHandler::deleteFingerprint(uint8_t id) {
+    Serial.printf("→ Đang xóa vân tay ID #%d...\n", id);
+
     uint8_t p = finger->deleteModel(id);
 
     if (p == FINGERPRINT_OK) {
         Serial.printf("✓ Đã xóa vân tay ID #%d\n", id);
+        if (buzzer) buzzer->play(BUZZ_DELETE);
         return true;
     } else {
         Serial.printf("✗ Lỗi xóa vân tay ID #%d\n", id);
+        if (buzzer) buzzer->play(BUZZ_ERROR);
         return false;
     }
 }
@@ -195,11 +213,15 @@ bool FingerprintHandler::deleteAllFingerprints() {
 }
 
 void FingerprintHandler::ledOn(uint8_t color) {
-    finger->LEDcontrol(FINGERPRINT_LED_ON, 0, color);
+    // R307 LED control
+    // color: 1=Red, 2=Blue, 3=Purple
+    uint8_t p = finger->LEDcontrol(FINGERPRINT_LED_BREATHING, 1, color);
+    Serial.printf("→ LED ON color=%d, result=0x%02X\n", color, p);
 }
 
 void FingerprintHandler::ledOff() {
-    finger->LEDcontrol(FINGERPRINT_LED_OFF, 0, FINGERPRINT_LED_BLUE);
+    uint8_t p = finger->LEDcontrol(FINGERPRINT_LED_OFF, 0, 0);
+    Serial.printf("→ LED OFF, result=0x%02X\n", p);
 }
 
 bool FingerprintHandler::getTemplate(uint8_t id, uint8_t* templateBuffer, uint16_t* templateSize) {

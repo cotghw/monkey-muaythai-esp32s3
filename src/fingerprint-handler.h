@@ -3,6 +3,9 @@
 
 #include <Adafruit_Fingerprint.h>
 
+// Forward declaration
+class BuzzerHandler;
+
 // Trạng thái xử lý vân tay
 enum FingerprintStatus {
     FP_SUCCESS,          // Thành công
@@ -19,12 +22,16 @@ private:
     Adafruit_Fingerprint *finger;
     HardwareSerial *serialPort;  // Serial port cho raw UART access
     uint8_t enrollStep;  // Bước đăng ký hiện tại
+    BuzzerHandler* buzzer;    // Buzzer
 
 public:
     FingerprintHandler(HardwareSerial *serial);
 
     // Khởi tạo và kiểm tra kết nối
     bool begin();
+
+    // Set buzzer cho UX feedback
+    void setBuzzer(BuzzerHandler* buzz);
 
     // Lấy thông tin cảm biến
     void printSensorInfo();

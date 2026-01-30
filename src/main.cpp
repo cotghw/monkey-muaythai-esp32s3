@@ -8,6 +8,7 @@
 #include "mqtt-client.h"
 #include "command-handler.h"
 #include "offline-queue.h"
+#include "buzzer-handler.h"
 
 // ==========================================
 // Global Objects
@@ -20,11 +21,12 @@ DirectusClient* directusClient;
 MQTTClient* mqttClient;
 CommandHandler* commandHandler;
 OfflineQueue* offlineQueue;
+BuzzerHandler* buzzerHandler;
 
 // ==========================================
 // Global Variables
 // ==========================================
-bool autoLoginMode = false;
+bool autoLoginMode = true;  // Auto-login ON by default, pauses for MQTT commands
 unsigned long lastFingerprintCheck = 0;
 static bool wasWiFiConnected = false;
 
@@ -51,12 +53,19 @@ void checkAutoLogin();
 // ==========================================
 void setup() {
     Serial.begin(115200);
-    while (!Serial) delay(10);
+    delay(1000);  // Wait for Serial to stabilize (ESP32-S3 USB CDC)
 
     Serial.println("\n\n╔════════════════════════════════════════╗");
     Serial.println("║   HỆ THỐNG CHẤM CÔNG VÂN TAY         ║");
     Serial.println("║   ESP32-S3 + R307 + CMS Integration   ║");
     Serial.println("╚════════════════════════════════════════╝\n");
+
+    // 0. Khởi tạo Buzzer UX
+    Serial.println("→ Khởi tạo Buzzer...");
+    buzzerHandler = new BuzzerHandler();
+    if (!buzzerHandler->begin()) {
+        Serial.println("⚠ Buzzer không khả dụng (không bắt buộc)");
+    }
 
     // 1. Khởi tạo R307 Fingerprint Sensor
     Serial.println("→ Khởi tạo R307 Fingerprint Sensor...");
@@ -65,10 +74,18 @@ void setup() {
 
     fpHandler = new FingerprintHandler(&serialPort);
 
+    // Set buzzer cho UX feedback
+    fpHandler->setBuzzer(buzzerHandler);
+
     if (!fpHandler->begin()) {
-        Serial.println("✗ CRITICAL: Không kết nối được R307!");
-        Serial.println("Hệ thống không thể hoạt động.");
-        while (1) delay(1000);
+        Serial.println("✗ WARNING: Không kết nối được R307!");
+        if (buzzerHandler) buzzerHandler->play(BUZZ_ERROR);
+        Serial.println("Thử lại sau 3 giây...");
+        delay(3000);
+        if (!fpHandler->begin()) {
+            Serial.println("✗ R307 vẫn không kết nối. Tiếp tục khởi động (auto-login sẽ bị tắt)...");
+            autoLoginMode = false;  // Disable auto-login if sensor not available
+        }
     }
 
     fpHandler->printSensorInfo();
@@ -110,6 +127,9 @@ void setup() {
             Serial.println("✓ Device đã được đăng ký trong Directus");
         }
     }
+
+    // Success beep
+    if (buzzerHandler) buzzerHandler->play(BUZZ_SUCCESS);
 
     // 6. Khởi tạo MQTT Client
     Serial.println("\n→ Khởi tạo MQTT Client...");
@@ -608,10 +628,11 @@ void checkAutoLogin() {
     int fingerprintID = fpHandler->verifyFingerprint();
 
     if (fingerprintID > 0) {
+        // Tìm thấy vân tay trên sensor
         uint16_t confidence = fpHandler->getConfidence();
 
         Serial.println("\n→ Phát hiện vân tay!");
-        fpHandler->ledOn(3); // Purple LED
+        fpHandler->ledOn(3); // Purple LED - processing
 
         // Lấy template
         if (fpHandler->getTemplate(fingerprintID, templateBuffer, &templateSize)) {
@@ -625,13 +646,33 @@ void checkAutoLogin() {
                                                            templateBase64, confidence, memberId);
 
             if (access) {
+                // ACCESS GRANTED
                 fpHandler->ledOn(2); // Blue LED
+                if (buzzerHandler) buzzerHandler->play(BUZZ_ACCESS_GRANTED);
+                Serial.println("✓ ACCESS GRANTED - Attendance logged");
             } else {
+                // ACCESS DENIED - RẤT SAI!
                 fpHandler->ledOn(1); // Red LED
+                if (buzzerHandler) buzzerHandler->play(BUZZ_ACCESS_DENIED);
+                Serial.println("✗ ACCESS DENIED!");
+            }
+
+            // Publish attendance event via MQTT (real-time)
+            if (mqttClient->isConnected()) {
+                mqttClient->publishAttendance(deviceMac, memberId,
+                    "", confidence, access);
             }
 
             delay(2000);
             fpHandler->ledOff();
         }
+    } else if (fingerprintID == -1) {
+        // CÓ ngón tay nhưng KHÔNG KHỚP trên sensor - RẤT SAI!
+        fpHandler->ledOn(1); // Red LED
+        if (buzzerHandler) buzzerHandler->play(BUZZ_ACCESS_DENIED);
+        Serial.println("✗ VÂN TAY KHÔNG HỢP LỆ!");
+        delay(1500);
+        fpHandler->ledOff();
     }
+    // fingerprintID == -2: không có ngón tay → không làm gì
 }
