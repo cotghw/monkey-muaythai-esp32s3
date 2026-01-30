@@ -47,20 +47,17 @@ bool MQTTClient::begin(const char* broker, uint16_t port, const char* username,
 }
 
 void MQTTClient::setupTopics() {
-    // Format MAC for topic (remove colons, lowercase)
-    String macClean = _deviceId;
-    macClean.replace(":", "");
-    macClean.toLowerCase();
+    // Use MAC as-is (with colons, uppercase) to match Directus device_mac field
+    // Directus Flow builds topic: device/{{ device_mac }}/commands
+    char buffer[128];
 
-    char buffer[64];
-
-    snprintf(buffer, sizeof(buffer), MQTT_TOPIC_COMMANDS_TEMPLATE, macClean.c_str());
+    snprintf(buffer, sizeof(buffer), MQTT_TOPIC_COMMANDS_TEMPLATE, _deviceId.c_str());
     _commandTopic = String(buffer);
 
-    snprintf(buffer, sizeof(buffer), MQTT_TOPIC_STATUS_TEMPLATE, macClean.c_str());
+    snprintf(buffer, sizeof(buffer), MQTT_TOPIC_STATUS_TEMPLATE, _deviceId.c_str());
     _statusTopic = String(buffer);
 
-    snprintf(buffer, sizeof(buffer), MQTT_TOPIC_TELEMETRY_TEMPLATE, macClean.c_str());
+    snprintf(buffer, sizeof(buffer), MQTT_TOPIC_TELEMETRY_TEMPLATE, _deviceId.c_str());
     _telemetryTopic = String(buffer);
 
     _attendanceTopic = MQTT_TOPIC_ATTENDANCE_LIVE;

@@ -99,19 +99,81 @@ bool DirectusClient::compareTemplates(const String& template1, const String& tem
 }
 
 bool DirectusClient::findMatchingFingerprint(const String& deviceMac, const String& templateData,
-                                            String& fingerprintId, String& memberId) {
-    // NOTE: Simplified version - Skip template matching
-    // R307 sensor đã verify fingerprint, chúng ta chỉ cần log vào Directus
+                                            String& fingerprintId, String& memberId,
+                                            uint8_t sensorFingerprintID) {
+    // R307 sensor đã verify fingerprint locally (ID match)
+    // Query Directus để lấy member_id từ finger_print_id + device
 
-    Serial.println("✓ Fingerprint đã được verify bởi R307 sensor");
-    Serial.println("  Skip Directus template matching (Adafruit library limitation)");
+    // Get device UUID
+    String deviceId = getDeviceId(deviceMac);
+    if (deviceId.length() == 0) {
+        Serial.println("✗ Device chưa được đăng ký trong Directus!");
+        return false;
+    }
 
-    // Return placeholder values
-    // Actual member tracking sẽ được handle sau khi enroll vào Directus
-    fingerprintId = "verified";
-    memberId = "unknown";
+    // Query member_fingerprints by device_id to find matching fingerprint
+    String url = buildUrl("/items/member_fingerprints?filter[device_id][_eq]=" + deviceId +
+                         "&filter[status][_eq]=active&fields=id,finger_print_id,member_id,template_data&limit=127");
+    String response;
 
-    return true;
+    Serial.printf("[VERIFY] Sensor finger_print_id=%d, deviceId=%s\n",
+                 sensorFingerprintID, deviceId.c_str());
+    Serial.printf("[VERIFY] URL: %s\n", url.c_str());
+
+    int httpCode = _httpClient->get(url.c_str(), response);
+
+    Serial.printf("[VERIFY] HTTP %d, response length=%d\n", httpCode, response.length());
+
+    if (httpCode != 200) {
+        Serial.printf("✗ Lỗi query fingerprints (HTTP %d)\n", httpCode);
+        Serial.println(response.substring(0, 200));
+        return false;
+    }
+
+    JsonDocument doc;
+    if (!_httpClient->parseJSON(response, doc)) {
+        Serial.println("✗ Lỗi parse JSON response");
+        Serial.println(response.substring(0, 200));
+        return false;
+    }
+
+    JsonArray fingerprints = doc["data"].as<JsonArray>();
+    Serial.printf("[VERIFY] Found %d fingerprints in Directus\n", fingerprints.size());
+
+    if (fingerprints.size() == 0) {
+        Serial.println("✗ Không có fingerprint nào được đăng ký cho device này");
+        return false;
+    }
+
+    // Match by R307 sensor finger_print_id first (most reliable)
+    if (sensorFingerprintID > 0) {
+        for (JsonObject fp : fingerprints) {
+            int fpId = fp["finger_print_id"] | 0;
+            Serial.printf("[VERIFY] Comparing sensor=%d vs db=%d\n", sensorFingerprintID, fpId);
+            if (fpId == sensorFingerprintID) {
+                fingerprintId = fp["id"].as<String>();
+                memberId = fp["member_id"].as<String>();
+                Serial.printf("✓ Matched finger_print_id=%d → Member: %s\n",
+                             sensorFingerprintID, memberId.c_str());
+                return true;
+            }
+        }
+    }
+
+    // Fallback: try template matching
+    for (JsonObject fp : fingerprints) {
+        String fpTemplate = fp["template_data"] | "";
+        if (fpTemplate.length() > 0 && compareTemplates(templateData, fpTemplate)) {
+            fingerprintId = fp["id"].as<String>();
+            memberId = fp["member_id"].as<String>();
+            Serial.printf("✓ Template match! Member: %s\n", memberId.c_str());
+            return true;
+        }
+    }
+
+    Serial.printf("✗ No match: sensor_id=%d not found in %d fingerprints\n",
+                 sensorFingerprintID, fingerprints.size());
+    return false;
 }
 
 bool DirectusClient::verifyFingerprint(const String& deviceMac, uint8_t fingerprintID,
@@ -126,17 +188,17 @@ bool DirectusClient::verifyFingerprint(const String& deviceMac, uint8_t fingerpr
     Serial.println("║   ĐANG XÁC THỰC VỚI DIRECTUS...       ║");
     Serial.println("╚════════════════════════════════════════╝");
 
-    // Tìm fingerprint match
+    // Tìm fingerprint match (truyền fingerprintID từ R307 sensor)
     String fingerprintId;
-    if (!findMatchingFingerprint(deviceMac, templateData, fingerprintId, memberId)) {
-        // Log failed attempt
-        String deviceId = getDeviceId(deviceMac);
-        logAttendance("", deviceId, fingerprintID, confidence, false, "not_registered");
+    if (!findMatchingFingerprint(deviceMac, templateData, fingerprintId, memberId, fingerprintID)) {
+        // Skip attendance log — Directus requires member_id
+        Serial.println("✗ Fingerprint not registered — skipping attendance log");
         return false;
     }
 
     // Check confidence threshold
-    const uint16_t MIN_CONFIDENCE = 80;
+    // R307 sensor đã verify locally - confidence >= 50 là đủ tin cậy
+    const uint16_t MIN_CONFIDENCE = 50;
     if (confidence < MIN_CONFIDENCE) {
         Serial.printf("✗ Confidence quá thấp (%d < %d)\n", confidence, MIN_CONFIDENCE);
 

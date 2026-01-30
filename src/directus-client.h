@@ -118,7 +118,8 @@ private:
      * @return true nếu tìm thấy match
      */
     bool findMatchingFingerprint(const String& deviceMac, const String& templateData,
-                                String& fingerprintId, String& memberId);
+                                String& fingerprintId, String& memberId,
+                                uint8_t sensorFingerprintID = 0);
 
     /**
      * So sánh 2 Base64 template strings
